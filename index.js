@@ -1,5 +1,5 @@
 
-const Udp = require('./socket');
+const Socket = require('./socket');
 const Packet = require('./packet');
 const Util = require('./util')
 

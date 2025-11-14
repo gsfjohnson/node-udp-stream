@@ -21,7 +21,7 @@ const _bound = Symbol('_bound');
 const pCloseTransport = Symbol('closeTransport');
 
 // debug if appropriate
-let debug; try { debug = require('debug')('udp'); }
+let debug; try { debug = require('debug')('udpstream'); }
 catch (e) { debug = function(){}; } // empty stub
 
 const defaultOptions = {
