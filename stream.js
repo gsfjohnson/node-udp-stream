@@ -18,6 +18,7 @@ const _rp = Symbol('_remotePort');
 const _writable_closed = Symbol('_writableClosed');
 const _readable_closed = Symbol('_readableClosed');
 const _bound = Symbol('_bound');
+const _overloadBuffer = Symbol('_overloadBuffer');
 const pCloseTransport = Symbol('closeTransport');
 
 // debug if appropriate
@@ -47,18 +48,19 @@ class UdpStream extends NodeStream.Duplex
   {
     super(Object.assign({}, options, defaultOptions));
 
-    const { objectMode, remoteAddress, remotePort, socket, messagesFilter, closeTransport } = options;
+    const { objectMode, remoteAddress, remotePort, socket, messagesFilter, closeTransport, overloadBuffer } = options;
 
     if (!Util.isDgramSocket(socket)) throw new Error('Option `socket` should be a valid dgram socket.');
     if (remoteAddress) this.remoteAddress = remoteAddress;
     if (remotePort) this.remotePort = remotePort;
 
     this[_udpsock] = socket;
-    this[_objectmode] = objectMode;
     this[_closed] = false;
     this[_writable_closed] = false;
     this[_readable_closed] = false;
     this[_bound] = false;
+    if (objectMode) this[_objectmode] = objectMode;
+    if (overloadBuffer) this[_overloadBuffer] = true;
 
     const checkMessage = messagesFilter || filter;
 
@@ -70,6 +72,10 @@ class UdpStream extends NodeStream.Duplex
       debug('message:',message,rinfo);
       if (checkMessage(this, message, rinfo)) {
         if (this[_objectmode]) message = new Packet(message,rinfo);
+        else if (this[_overloadBuffer] && Buffer.isBuffer(message)) {
+          message.port = rinfo.port;
+          message.address = rinfo.address;
+        }
         this.process(message);
       }
     });
@@ -155,6 +161,11 @@ class UdpStream extends NodeStream.Duplex
     if (this[_objectmode]) {
       if (!Packet.isPacket(chunk)) { cb(new Error('chunk is not Packet object')); return; }
       buffer = chunk.buffer;
+      if (chunk.port) remotePort = chunk.port;
+      if (chunk.address) remoteAddress = chunk.address;
+    }
+    // allow Buffer objects to be overload with port/address properties
+    else if (this[_overloadBuffer] && Buffer.isBuffer(chunk)) {
       if (chunk.port) remotePort = chunk.port;
       if (chunk.address) remoteAddress = chunk.address;
     }
