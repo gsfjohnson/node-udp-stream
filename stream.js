@@ -6,7 +6,9 @@
 const NodeDgram = require('node:dgram');
 const NodeStream = require('node:stream');
 const NodeNet = require('node:net');
+const NodeUtil = require('node:util');
 
+const UdpStreamSub = require('./substream');
 const Packet = require('./packet');
 const Util = require('./util');
 
@@ -15,15 +17,18 @@ const _closed = Symbol('_closed');
 const _objectmode = Symbol('_objectmode');
 const _ra = Symbol('_remoteAddress');
 const _rp = Symbol('_remotePort');
+const _listen = Symbol('_listen');
 const _writable_closed = Symbol('_writableClosed');
 const _readable_closed = Symbol('_readableClosed');
 const _bound = Symbol('_bound');
 const _overloadBuffer = Symbol('_overloadBuffer');
+const _on_message = Symbol('_on_message');
+const _filter = Symbol('_filter');
 const pCloseTransport = Symbol('closeTransport');
 
 // debug if appropriate
 let debug; try { debug = require('debug')('udpstream'); }
-catch (e) { debug = function(){}; } // empty stub
+catch (e) { debug = function(){}; debug.inactive = true } // empty stub
 
 const defaultOptions = {
   decodeStrings: true,
@@ -46,50 +51,61 @@ class UdpStream extends NodeStream.Duplex
    */
   constructor(options = {})
   {
+    debug('constructor()',options);
     super(Object.assign({}, options, defaultOptions));
 
     const { objectMode, remoteAddress, remotePort, socket, messagesFilter, closeTransport, overloadBuffer } = options;
 
-    if (!Util.isDgramSocket(socket)) throw new Error('Option `socket` should be a valid dgram socket.');
+    if (Util.isrinfo(options.rinfo)) { remoteAddress = options.rinfo.address; remotePort = options.rinfo.port }
     if (remoteAddress) this.remoteAddress = remoteAddress;
     if (remotePort) this.remotePort = remotePort;
+
+    if (!Util.isDgramSocket(socket)) throw new Error('Option `socket` should be a valid dgram socket.');
 
     this[_udpsock] = socket;
     this[_closed] = false;
     this[_writable_closed] = false;
     this[_readable_closed] = false;
     this[_bound] = false;
-    if (objectMode) this[_objectmode] = objectMode;
+    this[_filter] = messagesFilter || filter;
+
+    if (objectMode) this[_objectmode] = true;
     if (overloadBuffer) this[_overloadBuffer] = true;
 
-    const checkMessage = messagesFilter || filter;
-
-    if (typeof checkMessage !== 'function') {
+    if (typeof this[_filter] !== 'function') {
       throw new TypeError('Option `messagesFilter` should be a function.');
     }
 
-    this[_udpsock].on('message', (message, rinfo) => {
-      debug('message:',message,rinfo);
-      if (checkMessage(this, message, rinfo)) {
-        if (this[_objectmode]) message = new Packet(message,rinfo);
-        else if (this[_overloadBuffer] && Buffer.isBuffer(message)) {
-          message.port = rinfo.port;
-          message.address = rinfo.address;
-        }
-        this.process(message);
-      }
-    });
-
-    this[_udpsock].once('close', () => {
-      this[_closed] = true;
-      this.close();
-    });
-
-    this.once('finish', () => {
-      this[_writable_closed] = true;
-    });
+    this[_udpsock].on('message', this[_on_message].bind(this) );
+    this[_udpsock].once('close', this.close.bind(this) );
+    this.once('finish', () => { this[_writable_closed] = true; });
 
     this[pCloseTransport] = Util.isBoolean(closeTransport) ? closeTransport : true;
+  }
+
+  [_on_message](message,rinfo)
+  {
+    debug('[_on_message]()');
+
+    if (!this[_filter](this, message, rinfo))
+    {
+      debug('-- message DID NOT pass filter, dropping:',message,rinfo);
+      return;
+    }
+    debug('-- message passed filter:',message,rinfo);
+
+    if (this[_objectmode]) message = new Packet(message,rinfo);
+    else if (this[_overloadBuffer] && Buffer.isBuffer(message)) {
+      message.port = rinfo.port;
+      message.address = rinfo.address;
+    }
+
+    this.process(message,rinfo);
+  }
+
+  [_listen](data,rinfo) {
+    debug('_listen(): return true');
+    return true; // create connections by default
   }
 
   /**
@@ -191,18 +207,24 @@ class UdpStream extends NodeStream.Duplex
    * @param {Error} error
    * @param {Function} callback
    */
-  _destroy(error, callback) {
+  _destroy(error, callback)
+  {
+    debug('_destroy()');
+
     if (!this[_writable_closed]) {
+      debug('-- writable.end()');
       this.end();
       this[_writable_closed] = true;
     }
 
     if (!this[_readable_closed]) {
+      debug('-- readable.push(null)');
       this.push(null);
       this[_readable_closed] = true;
     }
 
     if (!this[_closed]) {
+      debug('-- udpsocket.close()');
       this[_udpsock].close();
       this[_closed] = true;
     }
@@ -215,14 +237,41 @@ class UdpStream extends NodeStream.Duplex
    * @param {Buffer} data
    * @returns {boolean}
    */
-  process(data)
+  process(data,rinfo)
   {
-    debug('process',data);
+    debug('process()');
+    if (data) debug('-- data:',data);
+    if (rinfo) debug('-- rinfo:',rinfo);
     if (this[_readable_closed]) return false;
-    if (this[_objectmode] && !Packet.isPacket(data)) throw new TypeError('data must be Packet object');
-    if (!this[_objectmode] && !Buffer.isBuffer(data)) throw new TypeError('data must be buffer object');
+    if (this[_objectmode] && !Packet.isPacket(data)) throw new TypeError('first parameter must be Packet object');
+    if (!this[_objectmode] && !Buffer.isBuffer(data)) throw new TypeError('first parameter must be buffer object');
+    if (this[_listen] && !Util.isrinfo(rinfo)) throw new TypeError('second parameter must be rinfo object');
     //if (data === null) throw new TypeError('data cannot be null');
 
+    if (this[_listen]) {
+      const peer = rinfo.address+':'+rinfo.port;
+      if (this.listenerCount(peer)) {
+        debug('-- emit `'+peer+'`',data);
+        this.emit(peer,data);
+        return;
+      }
+      debug('-- no substream found');
+
+      debug('-- exec substream creation test:',this[_listen]);
+      if (this[_listen](data,rinfo)) { // create connection
+        debug('-- creating substream:',peer);
+        const params = { parent: this, rinfo };
+        if (this[_objectmode]) params.objectMode = true;
+        if (this[_overloadBuffer]) params.overloadBuffer = true;
+        const connection = new UdpStreamSub(params)
+        debug('-- emit `connection`',connection);
+        this.emit('connection',connection);
+        connection.process(data,rinfo);
+        return;
+      }
+    }
+
+    debug('process() push',data);
     this.push(data);
     return true;
   }
@@ -230,18 +279,24 @@ class UdpStream extends NodeStream.Duplex
   /**
    * Close socket.
    */
-  close() {
+  close()
+  {
+    debug('close()');
+
     if (!this[_closed] && this[pCloseTransport]) {
+      debug('-- udpsocket.close()');
       this[_udpsock].close();
       this[_closed] = true;
     }
 
     if (!this[_writable_closed]) {
+      debug('-- writable.end()');
       this.end();
       this[_writable_closed] = true;
     }
 
     if (!this[_readable_closed]) {
+      debug('-- readable.push(null)');
       this.push(null);
       this[_readable_closed] = true;
     }
@@ -256,21 +311,26 @@ class UdpStream extends NodeStream.Duplex
    */
   bind(...arr)
   {
-    let port, address, cb;
-    let el; while (el = arr.shift()) {
-      if (Util.isPort(el)) port = el;
-      else if (NodeNet.isIP(el)) address = el;
-      else if (typeof el == 'function') cb = el;
-    }
+    debug('bind()',...arr);
+    let { port, address, onBind } = Util.parseBindParameters(...arr);
+
+    if (onBind) this.once('bind',onBind);
+
+    const onBound = function() {
+      debug('bind() onBind()');
+      const addr = this[_udpsock].address();
+      debug('-- success:',addr);
+      this[_bound] = true;
+      debug('-- this[_bound] = true');
+      debug('-- emit `bind`');
+      this.emit('bind');
+    }.bind(this);
+
     const params = [];
     if (port) { params.push(port); } //this.remotePort = port; }
     if (address) { params.push(address); } //this.remoteAddress = address; }
-    this[_udpsock].bind(...params,() => {
-      const { port, address } = this[_udpsock].address();
-      debug('bound',port,address);
-      this[_bound] = true;
-      if (cb) return cb();
-    });
+
+    this[_udpsock].bind(...params, onBound);
   }
 
   /**
@@ -282,19 +342,16 @@ class UdpStream extends NodeStream.Duplex
    */
   connect(...arr)
   {
-    let port, address, cb;
-    let el; while (el = arr.shift()) {
-      if (Util.isPort(el)) port = el;
-      else if (NodeNet.isIP(el)) address = el;
-      else if (typeof el == 'function') cb = el;
-    }
+    debug('connect()',...arr);
+    let { port, address, onConnect } = Util.parseConnectParameters(...arr);
+
     const params = [];
     if (port) { params.push(port); this.remotePort = port; }
     if (address) { params.push(address); this.remoteAddress = address; }
     //if (cb) params.push(cb);
 
-    if (!this[_bound]) { this.bind(cb); return; }
-    if (cb) { cb(); return; }
+    if (!this[_bound]) this.bind(onConnect);
+    else if (onConnect) onConnect();
     return;
 
     this[_udpsock].connect(...params,(err) => {
@@ -305,7 +362,38 @@ class UdpStream extends NodeStream.Duplex
   }
 
   /**
-   * Create a new UDP socket.
+   * Listen for packets on address, emit connect.
+   * @param {Number} [port]
+   * @param {String} [address]
+   * @param {Function} [onListen]
+   * @param {Function} [onMessage]
+   * @returns {undefined}
+   */
+  listen(...arr)
+  {
+    debug('listen()',...arr);
+    let { port, address, onListen, onMessage } = Util.parseListenParameters(...arr);
+
+    if (onListen) this.once('listen',onListen);
+    if (onMessage) this[_listen] = onMessage;
+    else this[_listen] = function() { return true; } // create connection for every new unique address:port
+
+    const onBound = function() {
+      debug('listen() onBind()');
+      debug('-- this[_listen] =',this[_listen]);
+      debug('-- emit `listen`');
+      this.emit('listen');
+    }.bind(this);
+
+    const params = [];
+    if (port) { params.push(port); } //this.remotePort = port; }
+    if (address) { params.push(address); } //this.remoteAddress = address; }
+
+    this.bind(...params, onBound);
+  }
+
+  /**
+   * Create new UdpStream.
    * @param {dgram.Socket|string|Object} socket
    * @param {Object} [options]
    * @returns {UdpStream}
@@ -321,7 +409,20 @@ class UdpStream extends NodeStream.Duplex
     return new UdpStream(Object.assign({}, options));
   }
 
-  static createPacket(...arr) { return new Packet(...arr) }
+  /**
+   * Create new UdpPacket.
+   * @param {Buffer} buffer
+   * @param {Number} [port]
+   * @param {String} [address]
+   * @returns {UdpPacket}
+   */
+  static createPacket(...arr) {
+    return new Packet(...arr);
+  }
+
+  [NodeUtil.inspect.custom](depth, options, inspect) {
+    return '[UdpStream]';
+  }
 }
 
 
