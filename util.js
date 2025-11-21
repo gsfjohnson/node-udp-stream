@@ -60,38 +60,26 @@ function isrinfo(val) {
 function parseBindParameters(...arr)
 {
   let port, address, onBind, onMessage;
-  let el; while (el = arr.shift()) {
+  arr.forEach( (el) => {
     if ( isPort(el) ) port = el;
     else if (NodeNet.isIP(el)) address = el;
     else if (!onBind && typeof el == 'function') onBind = el;
     else if (!onMessage && typeof el == 'function') onMessage = el;
-  }
+  });
   return { port, address, onBind, onMessage };
 }
 
 function parseListenParameters(...arr)
 {
   let port, address, onListen, onMessage;
-  let el; while (el = arr.shift()) {
+  arr.forEach( (el) => {
     if ( isPort(el) ) port = el;
     else if (NodeNet.isIP(el)) address = el;
     else if (!onListen && typeof el == 'function') onListen = el;
     else if (!onMessage && typeof el == 'function') onMessage = el;
-  }
+  });
   return { port, address, onListen, onMessage };
 }
-
-function parseConnectParameters(...arr)
-{
-  let port, address, onConnect;
-  let el; while (el = arr.shift()) {
-    if ( isPort(el) ) port = el;
-    else if (NodeNet.isIP(el)) address = el;
-    else if (typeof el == 'function') onConnect = el;
-  }
-  return { port, address, onConnect };
-}
-
 
 module.exports = {
   isPort,
@@ -101,6 +89,4 @@ module.exports = {
   isDgramSocket,
   parseBindParameters,
   parseListenParameters,
-  parseConnectParameters,
-  parent: _parent,
 }
