@@ -23,7 +23,8 @@ const _writable_closed = Symbol('_writableClosed');
 const _readable_closed = Symbol('_readableClosed');
 const _bound = Symbol('_bound');
 const _overloadBuffer = Symbol('_overloadBuffer');
-const _on_message = Symbol('_on_message');
+const _on_message = Symbol('onMessage');
+const _on_error = Symbol('onError');
 const _filter = Symbol('_filter');
 const pCloseTransport = Symbol('closeTransport');
 
@@ -83,11 +84,21 @@ class UdpStream extends NodeStream.Duplex
       throw new TypeError('Option `messagesFilter` should be a function.');
     }
 
+    this[_udpsock].on('error', this[_on_error].bind(this) );
     this[_udpsock].on('message', this[_on_message].bind(this) );
     this[_udpsock].once('close', this.close.bind(this) );
     this.once('finish', () => { this[_writable_closed] = true; });
 
     this[pCloseTransport] = Util.isBoolean(closeTransport) ? closeTransport : true;
+  }
+
+  [_on_error](err)
+  {
+    //debug('[_on_error]()');
+    //debug('-- emitting `error`',err.message);
+    //this.emit('error',err);
+    debug('-- this.destroy()',err.message);
+    this.destroy(err);
   }
 
   [_on_message](message,rinfo)
@@ -192,58 +203,65 @@ class UdpStream extends NodeStream.Duplex
    */
   _write(chunk, encoding, cb)
   {
-    debug('_write()',chunk);
+    try {
+      debug('_write()',chunk);
 
-    const err = function(e) { debug('error:',e.message); cb(e); }
+      const err = function(e) { debug('error:',e.message); cb(e); }
 
-    if (this[_writable_closed]) { err(new Error('Write after free.')); return; }
+      if (this[_writable_closed]) { err(new Error('Write after free.')); return; }
 
-    const connected = this[_connected];
-    let remotePort, remoteAddress, buffer;
+      const connected = this[_connected];
+      let remotePort, remoteAddress, buffer;
 
-    // de-encapsulate buffer out of Packet
-    if (this[_objectmode]) {
-      if (!Packet.isPacket(chunk)) { err(new Error('chunk is not Packet object')); return; }
-      buffer = chunk.buffer;
-      remotePort = chunk.port;
-      remoteAddress = chunk.address;
+      // de-encapsulate buffer out of Packet
+      if (this[_objectmode]) {
+        if (!Packet.isPacket(chunk)) { err(new Error('chunk is not Packet object')); return; }
+        buffer = chunk.buffer;
+        remotePort = chunk.port;
+        remoteAddress = chunk.address;
+      }
+      // allow Buffer objects to be overload with port/address properties
+      else if (this[_overloadBuffer]) {
+        if (!Buffer.isBuffer(chunk)) { err(new Error('chunk is not Buffer object')); return; }
+        buffer = chunk;
+        remotePort = chunk.port;
+        remoteAddress = chunk.address;
+      }
+      else if (Buffer.isBuffer(chunk)) {
+        let { address, port } = chunk;
+        buffer = chunk;
+        if (port) remotePort = port;
+        if (address) remoteAddress = address;
+      }
+
+      if (this[_connected]) {
+        let [ address, port ] = this[_connected].split(':');
+        if (!remoteAddress) remoteAddress = address;
+        if (!remotePort) remotePort = parseInt(port);
+      }
+
+      if (!Buffer.isBuffer(buffer)) throw new Error('data must be Buffer');
+      if (!Util.isPort(remotePort)) throw new Error('must provide remotePort: '+remotePort);
+      if (!NodeNet.isIP(remoteAddress)) throw new Error('most provide remoteAddress: '+remoteAddress);
+
+      const params = [buffer];
+      if (!connected && remotePort) params.push(remotePort);
+      if (!connected && remoteAddress) params.push(remoteAddress);
+      //if (cb) params.push(cb);
+
+      // send it
+      const onSent = function() {
+        debug('sent',...params);
+        if (cb) cb();
+      };
+      //debug('sending',...params,onSent);
+      this[_udpsock].send(...params,onSent);
     }
-    // allow Buffer objects to be overload with port/address properties
-    else if (this[_overloadBuffer]) {
-      if (!Buffer.isBuffer(chunk)) { err(new Error('chunk is not Buffer object')); return; }
-      buffer = chunk;
-      remotePort = chunk.port;
-      remoteAddress = chunk.address;
+    catch (e) {
+      debug(e);
+      cb(e);
+      return;
     }
-    else if (Buffer.isBuffer(chunk)) {
-      let { address, port } = chunk;
-      buffer = chunk;
-      if (port) remotePort = port;
-      if (address) remoteAddress = address;
-    }
-
-    if (this[_connected]) {
-      let [ address, port ] = this[_connected].split(':');
-      if (!remoteAddress) remoteAddress = address;
-      if (!remotePort) remotePort = parseInt(port);
-    }
-
-    if (!Buffer.isBuffer(buffer)) { err(new Error('data must be Buffer')); return; }
-    if (!Util.isPort(remotePort)) { err(new Error('must provide remotePort: '+remotePort)); return; }
-    if (!NodeNet.isIP(remoteAddress)) { err(new Error('most provide remoteAddress: '+remoteAddress)); return; }
-
-    const params = [buffer];
-    if (!connected && remotePort) params.push(remotePort);
-    if (!connected && remoteAddress) params.push(remoteAddress);
-    //if (cb) params.push(cb);
-
-    // send it
-    const onSent = function() {
-      debug('sent',...params);
-      if (cb) cb();
-    };
-    debug('sending',...params,onSent);
-    this[_udpsock].send(...params,onSent);
   }
 
   /**

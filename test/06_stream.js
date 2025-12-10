@@ -1,5 +1,5 @@
-const Assert = require('assert');
-const dgram = require('dgram');
+const Assert = require('node:assert');
+const dgram = require('node:dgram');
 
 const { UdpStream } = require('../stream');
 const Util = require('../util');
@@ -201,6 +201,30 @@ describe('UdpStream', function()
 
       stream1.on('data', onData);
       stream1.listen(0, onListen);
+    });
+
+    it('should catch error when data is refused', function(done)
+    {
+      if (!success.listen) this.skip();
+
+      stream1 = new UdpStream({ socket: socket1 });
+
+      const onError = function(err) {
+        try {
+          Assert.match(err.message,/ECONNREFUSED/);
+          done();
+        }
+        catch (e) {
+          done(e);
+          return;
+        }
+        //done();
+      }
+
+      stream1.on('error', onError);
+      stream1.connect(65001, () => {
+        stream1.write('whatever');
+      });
     });
   });
 

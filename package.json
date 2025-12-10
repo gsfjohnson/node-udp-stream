@@ -1,6 +1,6 @@
 {
   "name": "@gsfjohnson/udpstream",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "UDP Duplex Stream",
   "main": "index.js",
   "scripts": {
@@ -16,7 +16,6 @@
   "author": "gsfjohnson",
   "license": "UNLICENSED",
   "devDependencies": {
-    "debug": "^4.4.3",
-    "sinon": "^21.0.0"
+    "debug": "^4.4.3"
   }
 }
